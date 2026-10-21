@@ -1,0 +1,15 @@
+.env
+credentials.json
+allowed_users.json
+banned_users.json
+status.json
+.commands_state.json
+bot_log.txt
+venv/
+reports/
+_update_temp.zip
+_update_temp_dir/
+__pycache__/
+*.pyc
+*.html
+.vscode
