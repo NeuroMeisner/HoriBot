@@ -1,0 +1,12 @@
+# По умолчанию нормализовать текстовые файлы
+* text=auto
+
+# Windows-скрипты ОБЯЗАТЕЛЬНО с CRLF (cmd.exe капризен к LF в .bat)
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+# Код и документы — LF
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.html text eol=lf
