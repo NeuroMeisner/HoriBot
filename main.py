@@ -113,75 +113,88 @@ ADMIN_COMMANDS = BOT_COMMANDS + [
     BotCommand(command="banlist", description="Список банов"),
 ]
 
-# Файл с хэшем последних успешно установленных команд.
-# Лежит рядом с main.py, в репозиторий не попадает (добавьте в .gitignore).
-COMMANDS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".commands_state.json")
-
 
 # ============================================
 # УСТАНОВКА КОМАНД (С ЗАЩИТОЙ ОТ FLOOD CONTROL)
 # ============================================
 
-async def set_commands(bot: Bot):
-    """Устанавливает команды бота в меню.
 
-    Чтобы не ловить flood control при частых перезапусках,
-    команды устанавливаются только если их набор (или список админов)
-    изменился с последней успешной установки.
-    """
-    # Хэш текущей конфигурации команд
-    payload = {
-        "bot": [(c.command, c.description) for c in BOT_COMMANDS],
-        "admin": [(c.command, c.description) for c in ADMIN_COMMANDS],
-        "admins": sorted(ADMIN_IDS),
-    }
-    current_hash = hashlib.md5(
+# Файл с хэшами последних успешно установленных команд (отдельно по каждому скоупу).
+# Лежит рядом с main.py, в репозиторий не попадает (добавлен в .gitignore).
+COMMANDS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".commands_state.json")
+
+
+def _load_commands_state() -> dict:
+    """Читает файл состояния команд. Возвращает пустой словарь, если файла нет или он битый."""
+    try:
+        with open(COMMANDS_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_commands_state(state: dict):
+    """Сохраняет файл состояния команд."""
+    try:
+        with open(COMMANDS_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.warning(f"Не удалось сохранить состояние команд: {e}")
+
+
+def _commands_hash(commands) -> str:
+    """Хэш списка команд — для определения, изменился ли набор."""
+    payload = [(c.command, c.description) for c in commands]
+    return hashlib.md5(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
 
-    # Если с прошлой успешной установки ничего не менялось — пропускаем
-    saved_hash = None
-    if os.path.exists(COMMANDS_STATE_FILE):
-        try:
-            with open(COMMANDS_STATE_FILE, "r", encoding="utf-8") as f:
-                saved_hash = f.read().strip()
-        except OSError:
-            saved_hash = None
 
-    if saved_hash == current_hash:
-        logger.info("Команды уже установлены ранее — пропускаю (защита от flood control).")
-        return
+async def set_commands(bot: Bot):
+    """Устанавливает команды бота в меню с раздельным кэшем по скоупам.
 
-    success = True
+    - Базовые команды кэшируются одним ключом "base".
+    - Каждый админ кэшируется отдельным ключом "admin_<id>".
+    Благодаря этому файл создаётся сразу после успеха базовых команд,
+    а админ, который ещё не написал /start, не заставляет бот
+    повторять уже установленные вызовы (защита от flood control).
+    """
+    state = _load_commands_state()
 
     # 1. Базовые команды для всех
-    try:
-        await bot.set_my_commands(commands=BOT_COMMANDS, scope=BotCommandScopeDefault())
-        logger.info("Базовые команды установлены")
-    except Exception as e:
-        logger.warning(f"Не удалось установить базовые команды: {e}")
-        success = False
+    base_hash = _commands_hash(BOT_COMMANDS)
+    if state.get("base") == base_hash:
+        logger.info("Базовые команды уже установлены — пропускаю (защита от flood control).")
+    else:
+        try:
+            await bot.set_my_commands(commands=BOT_COMMANDS, scope=BotCommandScopeDefault())
+            state["base"] = base_hash
+            _save_commands_state(state)
+            logger.info("Базовые команды установлены")
+        except Exception as e:
+            logger.warning(f"Не удалось установить базовые команды: {e}")
 
-    # 2. Расширенные команды для каждого админа
+    # 2. Расширенные команды для каждого админа — независимо друг от друга
+    admin_hash = _commands_hash(ADMIN_COMMANDS)
     for admin_id in ADMIN_IDS:
+        key = f"admin_{admin_id}"
+        if state.get(key) == admin_hash:
+            continue  # этому админу команды уже ставили и набор не менялся
         try:
             await bot.set_my_commands(
                 commands=ADMIN_COMMANDS,
                 scope=BotCommandScopeChat(chat_id=admin_id)
             )
+            state[key] = admin_hash
+            _save_commands_state(state)
             logger.info(f"Команды установлены для админа {admin_id}")
         except Exception as e:
-            logger.warning(f"Не удалось установить команды для админа {admin_id}: {e}")
-            success = False
-
-    # Запоминаем хэш ТОЛЬКО при полном успехе — иначе повторим попытку
-    if success:
-        try:
-            with open(COMMANDS_STATE_FILE, "w", encoding="utf-8") as f:
-                f.write(current_hash)
-        except OSError as e:
-            logger.warning(f"Не удалось сохранить состояние команд: {e}")
-
+            logger.warning(
+                f"Не удалось установить команды для админа {admin_id}: {e}. "
+                f"Админ должен сначала написать боту /start; "
+                f"повторная попытка будет при следующем запуске."
+            )
 
 # ============================================
 # БЕЗОПАСНЫЙ POLLING (С ОБРАБОТКОЙ КОНФЛИКТА)
