@@ -1,0 +1,14 @@
+[Unit]
+Description=HoriBot Thermal Guard (overheat protection)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=/usr/bin/python3 __PROJECT_DIR__/server/thermal_guard.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

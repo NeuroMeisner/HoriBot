@@ -6,3 +6,4 @@ python-dotenv
 aiofiles
 aiohttp-socks
 tzdata
+psutil==6.1.0

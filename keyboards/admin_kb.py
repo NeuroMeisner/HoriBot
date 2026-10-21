@@ -15,6 +15,9 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🚫 Забаненные", callback_data="admin:banned_list")
         ],
         [
+            InlineKeyboardButton(text="🖥 Параметры сервера", callback_data="admin:server:info")
+        ],
+        [
             InlineKeyboardButton(text="🔙 Назад", callback_data="menu:back")
         ]
     ])

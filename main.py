@@ -22,7 +22,7 @@ from aiogram.exceptions import (
 import config
 from config import BOT_TOKEN, ADMIN_IDS
 from middlewares.auth_middleware import AuthMiddleware
-from handlers import booking, status, admin, time_picker, stats, admin_panel, update
+from handlers import booking, status, admin, time_picker, stats, admin_panel, update, server_info
 import auth_manager
 import update_checker
 from reports.stats_report import generate_test_report_html
@@ -371,6 +371,7 @@ async def main():
     dp.include_router(stats.router)
     dp.include_router(admin_panel.router)
     dp.include_router(update.router)
+    dp.include_router(server_info.router)
 
     # Создаём тестовый отчёт, если его нет
     ensure_test_report_exists()

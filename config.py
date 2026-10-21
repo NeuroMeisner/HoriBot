@@ -36,3 +36,11 @@ UPDATE_CHECK_ENABLED = os.getenv("UPDATE_CHECK_ENABLED", "true").lower() == "tru
 # Полный автопилот: устанавливать обновления без подтверждения админа.
 # По умолчанию ВЫКЛЮЧЕНО — бот только уведомляет о новой версии.
 AUTO_UPDATE = os.getenv("AUTO_UPDATE", "false").lower() == "true"
+
+# ====== ТЕРМОЗАЩИТА (пороги, °C) ======
+TEMP_WARN_C = float(os.getenv("TEMP_WARN_C", "75"))   # предупреждение
+TEMP_CRIT_C = float(os.getenv("TEMP_CRIT_C", "85"))   # аварийное выключение
+TEMP_NORM_C = float(os.getenv("TEMP_NORM_C", "65"))   # возврат в норму (гистерезис)
+TEMP_CHECK_SEC = int(os.getenv("TEMP_CHECK_SEC", "5"))
+TEMP_COOLDOWN_MIN = int(os.getenv("TEMP_COOLDOWN_MIN", "10"))
+
