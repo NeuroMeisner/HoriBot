@@ -21,6 +21,8 @@ HoriBot Thermal Guard — независимая защита сервера о�
   --once        одна проверка и выход (подразумевает dry-run)
 """
 
+import urllib.error
+import urllib.request
 import argparse
 import json
 import logging
@@ -79,28 +81,62 @@ def write_status(data: dict):
     os.replace(tmp, STATUS_FILE)
 
 
-def send_telegram(token: str, chat_ids: list, text: str) -> bool:
-    """Отправка сообщения админам напрямую через Telegram API (stdlib)."""
+def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bool:
+    """Отправка сообщения админам напрямую через Telegram API (stdlib).
+
+    Улучшения по сравнению с первой версией:
+    - при HTTP-ошибке в лог пишется ТОЧНОЕ описание от Telegram
+      (например, "chat not found" или "bot was blocked by the user");
+    - сетевые ошибки и таймауты повторяются до retries раз с растущей паузой;
+    - ошибки 4xx (неверные данные) не повторяются — это бессмысленно.
+    """
     if not token or not chat_ids:
         logger.error("Нет BOT_TOKEN или ADMIN_IDS — уведомление не отправлено.")
         return False
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     ok = False
+
     for chat_id in chat_ids:
         payload = json.dumps({
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
         }).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=payload, headers={"Content-Type": "application/json"}
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp.read()
-            ok = True
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление {chat_id}: {e}")
+
+        for attempt in range(1, retries + 1):
+            req = urllib.request.Request(
+                url, data=payload, headers={"Content-Type": "application/json"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    resp.read()
+                ok = True
+                break  # доставлено — переходим к следующему адресату
+            except urllib.error.HTTPError as e:
+                # Читаем тело ответа: там точная причина от Telegram
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    body = "<тело ответа недоступно>"
+                logger.error(
+                    f"Не удалось отправить уведомление {chat_id} "
+                    f"(попытка {attempt}/{retries}): HTTP {e.code}: {body}"
+                )
+                # 4xx — ошибка в данных (чат не найден, блокировка, битый HTML):
+                # повторы бессмысленны
+                if 400 <= e.code < 500:
+                    break
+            except Exception as e:
+                logger.error(
+                    f"Не удалось отправить уведомление {chat_id} "
+                    f"(попытка {attempt}/{retries}): {e}"
+                )
+
+            # Пауза перед следующей попыткой (только для сетевых ошибок)
+            if attempt < retries:
+                time.sleep(3 * attempt)
+
     return ok
 
 
@@ -292,18 +328,29 @@ def main():
         f"norm={norm}, интервал={interval}с, dry_run={args.dry_run}"
     )
 
-    # Напоминание после аварийного включения
+    # Восстановление состояния из статус-файла: цепочка WARN -> NORM
+    # не должна рваться при перезапуске guard, рестарте systemd,
+    # перезагрузке сервера или тестах через --once
     prev = read_status()
-    if prev and prev.get("state") == "CRITICAL":
-        le = prev.get("last_event") or {}
-        send_telegram(token, admins, (
-            "🟠 <b>Сервер включён после АВАРИЙНОГО отключения по перегреву.</b>\n\n"
-            f"Инцидент: {le.get('time', '?')}, {le.get('temp', '?')}°C.\n"
-            "Прежде чем нагружать сервер, проверьте причину перегрева: "
-            "пыль, вентиляторы, температуру в помещении."
-        ))
-
     state = "NORMAL"
+    if prev:
+        prev_state = prev.get("state")
+        if prev_state == "CRITICAL":
+            # Прошлый сеанс закончился аварийным выключением
+            le = prev.get("last_event") or {}
+            send_telegram(token, admins, (
+                "🟠 <b>Сервер включён после АВАРИЙНОГО отключения по перегреву.</b>\n\n"
+                f"Инцидент: {le.get('time', '?')}, {le.get('temp', '?')}°C.\n"
+                "Прежде чем нагружать сервер, проверьте причину перегрева: "
+                "пыль, вентиляторы, температуру в помещении."
+            ))
+            state = "NORMAL"
+        elif prev_state == "WARNED":
+            # Инцидент перегрева ещё не закрыт сообщением о норме
+            state = "WARNED"
+            logger.info("Восстановлено состояние из статус-файла: WARNED "
+                        "(инцидент перегрева не закрыт)")
+
     last_event = (prev or {}).get("last_event")
     last_warn_sent = 0.0
 
@@ -381,6 +428,8 @@ def main():
                     f"Датчики: {format_temps(temps)}\n\n"
                     "Инцидент перегрева исчерпан."
                 ))
+                logger.info(f"Температура вернулась к норме: "
+                            f"{max_temp:.0f}°C < {norm:.0f}°C, отправлено уведомление")
                 last_event = {"type": "NORM", "temp": round(max_temp, 1),
                               "time": ts}
                 state = "NORMAL"

@@ -45,12 +45,33 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Дублируем логи в файл bot_log.txt.
-# Файл открывает только один процесс (сам бот), поэтому
-# больше не будет ошибки "файл занят другим процессом".
-_file_handler = logging.FileHandler("bot_log.txt", encoding="utf-8")
-_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logging.getLogger().addHandler(_file_handler)
+# Дублируем логи в файл. Если основной файл недоступен для записи
+# (залочен другим процессом, только чтение, синхронизация OneDrive),
+# НЕ падаем: пишем в резервный файл или ограничиваемся консолью.
+_file_handler = None
+for _log_name in ("bot_log.txt", f"bot_log_{os.getpid()}.txt"):
+    try:
+        _file_handler = logging.FileHandler(_log_name, encoding="utf-8")
+        _file_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        )
+        logging.getLogger().addHandler(_file_handler)
+        if _log_name != "bot_log.txt":
+            logging.getLogger(__name__).warning(
+                f"bot_log.txt недоступен для записи, логи идут в {_log_name}"
+            )
+        break
+    except OSError as e:
+        logging.getLogger(__name__).warning(
+            f"Не удалось открыть лог-файл {_log_name}: {e}"
+        )
+        _file_handler = None
+
+if _file_handler is None:
+    logging.getLogger(__name__).warning(
+        "Файловое логирование отключено: работаем только с консолью. "
+        "Проверьте атрибуты/блокировку bot_log.txt или OneDrive."
+    )
 
 # ============================================
 # ЗАЩИТА ОТ НЕСКОЛЬКИХ КОПИЙ БОТА
