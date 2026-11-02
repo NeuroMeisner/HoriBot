@@ -21,6 +21,7 @@ CALENDAR_LINK = os.getenv(
 
 # Прокси
 BOT_PROXY = os.getenv("BOT_PROXY", "YOUR_PROXY_HERE")
+PROXY_WORKER = os.getenv("PROXY_WORKER", "YOUR_WORKER_HERE")
 
 # Часовой пояс
 TIMEZONE = "Europe/Moscow"

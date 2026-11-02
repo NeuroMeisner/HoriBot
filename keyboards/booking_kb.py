@@ -22,6 +22,9 @@ def date_choice_kb() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📆 Выбрать другую дату", callback_data="date:pick")
+        ],
+        [
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu:back")
         ]
     ])
 
@@ -167,6 +170,10 @@ def time_slots_kb(
         buttons.append([
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
         ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+        ])
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -194,17 +201,21 @@ def my_bookings_kb(events: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def event_actions_kb(event_id: str) -> InlineKeyboardMarkup:
+def event_actions_kb(event_id: str, allow_reschedule: bool = True) -> InlineKeyboardMarkup:
     """Клавиатура действий с событием."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🗑 Удалить запись", callback_data=f"delete_event:{event_id}")
-        ],
-        [
-            InlineKeyboardButton(text="📋 Мои записи", callback_data="my_bookings"),
-            InlineKeyboardButton(text="🔙 В меню", callback_data="menu:back")
-        ]
+    rows = []
+    if allow_reschedule:
+        rows.append([
+            InlineKeyboardButton(text="📅 Перенести", callback_data=f"reschedule:{event_id}")
+        ])
+    rows.append([
+        InlineKeyboardButton(text="🗑 Удалить запись", callback_data=f"delete_event:{event_id}")
     ])
+    rows.append([
+        InlineKeyboardButton(text="📋 Мои записи", callback_data="my_bookings"),
+        InlineKeyboardButton(text="🔙 В меню", callback_data="menu:back")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def confirm_delete_kb(event_id: str) -> InlineKeyboardMarkup:

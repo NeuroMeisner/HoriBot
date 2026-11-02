@@ -10,6 +10,7 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -20,6 +21,7 @@ from aiogram.exceptions import (
 )
 
 import config
+import tgwsapiproxy
 from config import BOT_TOKEN, ADMIN_IDS
 from middlewares.auth_middleware import AuthMiddleware
 from handlers import booking, status, admin, time_picker, stats, admin_panel, update, server_info
@@ -384,24 +386,31 @@ async def main():
     """Инициализация и запуск бота."""
     global _INSTANCE_MUTEX
 
-    # Защита от второй копии: занимаем именованный mutex ОС.
-    # Если он уже занят — значит бот уже запущен, выходим с кодом 42,
-    # чтобы start_bot.bat остановил цикл перезапуска.
     _INSTANCE_MUTEX = acquire_single_instance_mutex()
     if _INSTANCE_MUTEX is None:
-        logger.error(
-            "Обнаружена уже запущенная копия бота на этой машине. "
-            "Завершаюсь, чтобы не создавать конфликт getUpdates."
-        )
+        logger.error("Обнаружена уже запущенная копия бота на этой машине.")
         sys.exit(EXIT_CODE_ANOTHER_INSTANCE)
 
-    # Настройка сессии: прокси из переменной окружения BOT_PROXY, если задан
-    bot_proxy = os.getenv("BOT_PROXY")
-    if bot_proxy:
-        logger.info(f"Используется прокси: {bot_proxy}")
-        session = AiohttpSession(proxy=bot_proxy)
+    # ============================================
+    # ВСТРОЕННЫЙ ПРОКСИ (явный запуск/остановка)
+    # ============================================
+
+    WORKER_HOST = os.getenv("PROXY_WORKER")
+    proxy_started = False
+
+    if WORKER_HOST:
+        try:
+            # Ключевое изменение: используем start_proxy вместо run_proxy
+            await tgwsapiproxy.start_proxy(WORKER_HOST)
+            
+            session = AiohttpSession(proxy=tgwsapiproxy.proxy_url())
+            proxy_started = True
+            logger.info(f"Встроенный прокси запущен: {tgwsapiproxy.proxy_url()}")
+        except Exception as e:
+            logger.warning(f"Не удалось запустить прокси: {e}. Прямое подключение.")
+            session = AiohttpSession()
     else:
-        logger.info("Прокси не используется (прямое подключение)")
+        logger.info("PROXY_WORKER не задан — прямое подключение")
         session = AiohttpSession()
 
     bot = Bot(
@@ -411,12 +420,9 @@ async def main():
     )
 
     dp = Dispatcher(storage=MemoryStorage())
-
-    # Middleware для проверки авторизации, бана и антиспама
     dp.message.middleware(AuthMiddleware())
     dp.callback_query.middleware(AuthMiddleware())
 
-    # Подключение роутеров обработчиков
     dp.include_router(admin.router)
     dp.include_router(time_picker.router)
     dp.include_router(status.router)
@@ -426,48 +432,46 @@ async def main():
     dp.include_router(update.router)
     dp.include_router(server_info.router)
 
-    # Создаём тестовый отчёт, если его нет
     ensure_test_report_exists()
 
-    # Инициализация кэша админов и установка команд
     try:
         await auth_manager.update_cache_from_group(bot)
         removed = await auth_manager.prune_stale_allowed_users(bot)
         if removed:
-            logger.warning(f"Выверка кэша при старте: удалены {removed}")
+            logger.warning(f"Выверка кэша: удалены {removed}")
         await set_commands(bot)
-        logger.info("Команды и кэш успешно обновлены")
     except Exception as e:
-        logger.warning(f"Не удалось обновить команды/кэш при запуске: {e}")
-    
-    # Проверка обновлений при запуске (автоустановка только при AUTO_UPDATE=true)
+        logger.warning(f"Ошибка инициализации: {e}")
+
     if config.UPDATE_CHECK_ENABLED:
         try:
             if await update_checker.maybe_auto_update():
-                logger.info("Обновление установлено при запуске. Перезапуск...")
                 update_checker.restart_bot()
                 return
         except Exception as e:
-            logger.warning(f"Ошибка проверки обновлений при запуске: {e}")
+            logger.warning(f"Ошибка проверки обновлений: {e}")
 
     logger.info("HoriBot запущен!")
 
-    # Фоновые задачи: ежемесячный отчёт и проверка обновлений
     monthly_task = asyncio.create_task(monthly_report_task(bot))
     update_task = asyncio.create_task(daily_update_check_task(bot))
     schedule_task_handle = asyncio.create_task(power_schedule.schedule_task(bot))
-    
+
     try:
         await safe_polling(dp, bot)
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+        logger.info("Бот остановлен")
     finally:
         monthly_task.cancel()
         update_task.cancel()
         schedule_task_handle.cancel()
         await session.close()
-        
-
+        if proxy_started:
+            try:
+                tgwsapiproxy.stop_proxy()
+                logger.info("Прокси остановлен")
+            except Exception as e:
+                logger.warning(f"Ошибка остановки прокси: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

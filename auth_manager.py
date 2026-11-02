@@ -55,10 +55,10 @@ async def load_allowed_users():
         return set()
 
 
-async def save_allowed_users(user_ids: set):
-    """Сохранить список в файл."""
-    async with aiofiles.open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
-        await f.write(json.dumps(list(user_ids)))
+async def save_allowed_users(users):
+    """Сохранить список разрешённых пользователей (принимает list или set)."""
+    with open(ALLOWED_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(users), f, ensure_ascii=False, indent=2)
 
 
 async def load_banned_users():
@@ -109,8 +109,8 @@ async def add_to_cache(bot, user_id: int, reason: str = "unknown"):
     """
     allowed = await load_allowed_users()
     if user_id not in allowed:
-        allowed.append(user_id)
-        await save_allowed_users(allowed)
+        allowed.add(user_id)                # ← set.add()
+        await save_allowed_users(list(allowed))  # ← сохраняем как список
     logger.info(f"[cache+] пользователь {user_id} добавлен в разрешённые "
                 f"(причина: {reason})")
 
@@ -119,7 +119,7 @@ async def remove_from_cache(user_id: int, reason: str = "unknown"):
     """Удалить пользователя из кэша разрешённых с журналированием причины."""
     allowed = await load_allowed_users()
     if user_id in allowed:
-        allowed.remove(user_id)
+        allowed.discard(user_id)
         await save_allowed_users(allowed)
         logger.info(f"[cache-] пользователь {user_id} удалён из разрешённых "
                     f"(причина: {reason})")
@@ -138,31 +138,31 @@ async def prune_stale_allowed_users(bot) -> list:
     )
 
     allowed = await load_allowed_users()
-    kept, removed = [], []
+    kept, removed = set(), set()
 
     for user_id in allowed:
         # Админов из кэша не выбрасываем никогда
         if user_id in config.ADMIN_IDS:
-            kept.append(user_id)
+            kept.add(user_id)
             continue
         try:
             member = await bot.get_chat_member(config.GROUP_CHAT_ID, user_id)
             if member.status in ("creator", "administrator", "member", "restricted"):
-                kept.append(user_id)
+                kept.add(user_id)
             else:  # left / kicked — больше не участник
-                removed.append(user_id)
+                removed.add(user_id)
         except TelegramBadRequest as e:
             if "user not found" in str(e).lower():
-                removed.append(user_id)  # никогда не был в группе
+                removed.add(user_id)  # никогда не был в группе
             else:
-                kept.append(user_id)
+                kept.add(user_id)
                 logger.warning(f"Неожиданный ответ при проверке {user_id}: {e}")
         except (TelegramNetworkError, TelegramServerError) as e:
-            kept.append(user_id)
+            kept.add(user_id)
             logger.warning(f"Сетевая ошибка при проверке {user_id}, "
                            f"оставляю в кэше: {e}")
         except Exception as e:
-            kept.append(user_id)
+            kept.add(user_id)
             logger.warning(f"Ошибка проверки {user_id}, оставляю в кэше: {e}")
 
     if removed:
@@ -171,29 +171,21 @@ async def prune_stale_allowed_users(bot) -> list:
     return removed
 
 async def update_cache_from_group(bot):
-    """Обновить кэш разрешённых пользователей через get_chat_administrators.
-    
-    Примечание: Полный список участников получить нельзя из-за ограничений API.
-    Этот метод обновляет кэш только администраторами. Для проверки обычных
-    пользователей используется is_user_in_group().
-    """
+    """Пересобрать кэш разрешённых по текущему составу группы."""
     try:
-        # ✅ Правильный метод: get_chat_administrators
-        admins = await bot.get_chat_administrators(chat_id=config.GROUP_CHAT_ID)
-        admin_ids = {a.user.id for a in admins}
+        allowed = set()
+        # ✅ Правильно: сначала await, получаем список, потом итерируемся
+        admins = await bot.get_chat_administrators(config.GROUP_CHAT_ID)
+        for member in admins:
+            allowed.add(member.user.id)
         
-        old_cache = await load_allowed_users()
-        new_cache = old_cache | admin_ids
+        # Если нужно добавить и обычных участников, используйте get_chat_members
+        # (если ваша версия aiogram поддерживает этот метод)
         
-        if new_cache != old_cache:
-            await save_allowed_users(new_cache)
-            logger.info(f"Кэш администраторов обновлён. Всего в кэше: {len(new_cache)}")
-            return True
-        return False
-        
+        await save_allowed_users(list(allowed))
+        logger.info(f"[cache] кэш обновлён: {len(allowed)} пользователей")
     except Exception as e:
-        logger.error(f"Ошибка обновления кэша админов: {e}")
-        return False
+        logger.warning(f"Не удалось обновить кэш: {e}")
 
 
 async def ban_user(bot, user_id: int, username: str):
@@ -223,7 +215,7 @@ async def unban_user(user_id: int) -> bool:
     """Разбанить пользователя."""
     banned = await load_banned_users()
     if user_id in banned:
-        banned.remove(user_id)
+        banned.discard(user_id)
         await save_banned_users(banned)
         return True
     return False

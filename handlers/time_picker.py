@@ -131,7 +131,9 @@ async def adjust_start_time(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(temp_start=new_time, temp_end=current_end)
     
-    busy_intervals = get_busy_intervals(chosen_date)
+    busy_intervals = get_busy_intervals(
+        chosen_date, exclude_event_id=data.get("reschedule_event_id")
+    )
     busy_text = "\n".join([f"• {bs.strftime('%H:%M')} – {be.strftime('%H:%M')}" for bs, be in busy_intervals]) or "<i>Нет занятых интервалов</i>"
     
     # Проверка "А чё так поздно?"
@@ -160,7 +162,9 @@ async def confirm_start_time(callback: CallbackQuery, state: FSMContext):
     
     await state.set_state(BookingStates.picking_time_end)
     
-    busy_intervals = get_busy_intervals(data["date"])
+    busy_intervals = get_busy_intervals(
+        chosen_date, exclude_event_id=data.get("reschedule_event_id")
+    )
     busy_text = "\n".join([f"• {bs.strftime('%H:%M')} – {be.strftime('%H:%M')}" for bs, be in busy_intervals]) or "<i>Нет занятых интервалов</i>"
     
     msg_text = (
@@ -211,7 +215,9 @@ async def adjust_end_time(callback: CallbackQuery, state: FSMContext):
 
     await state.update_data(temp_end=new_time)
     
-    busy_intervals = get_busy_intervals(data["date"])
+    busy_intervals = get_busy_intervals(
+        chosen_date, exclude_event_id=data.get("reschedule_event_id")
+    )
     busy_text = "\n".join([f"• {bs.strftime('%H:%M')} – {be.strftime('%H:%M')}" for bs, be in busy_intervals]) or "<i>Нет занятых интервалов</i>"
     
     late_warning = ""
@@ -271,7 +277,9 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
     start_time = data["temp_start"]
     end_time = data["temp_end"]
     
-    busy_intervals = get_busy_intervals(data["date"])
+    busy_intervals = get_busy_intervals(
+        chosen_date, exclude_event_id=data.get("reschedule_event_id")
+    )
     busy_text = "\n".join([f"• {bs.strftime('%H:%M')} – {be.strftime('%H:%M')}" for bs, be in busy_intervals]) or "<i>Нет занятых интервалов</i>"
     
     late_warning = ""
