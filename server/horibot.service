@@ -1,0 +1,15 @@
+[Unit]
+Description=HoriBot Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

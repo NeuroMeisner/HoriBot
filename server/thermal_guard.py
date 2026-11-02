@@ -38,7 +38,7 @@ from datetime import datetime
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(PROJECT_DIR, "server_state")
 STATUS_FILE = os.path.join(STATE_DIR, "thermal_status.json")
-LOG_FILE = os.path.join(STATE_DIR, "thermal_guard.log")
+LOGS_DIR = os.path.join(PROJECT_DIR, "logs")
 ENV_FILE = os.path.join(PROJECT_DIR, ".env")
 
 logger = logging.getLogger("thermal_guard")
@@ -84,16 +84,15 @@ def write_status(data: dict):
 def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bool:
     """Отправка сообщения админам напрямую через Telegram API (stdlib).
 
-    Улучшения по сравнению с первой версией:
-    - при HTTP-ошибке в лог пишется ТОЧНОЕ описание от Telegram
-      (например, "chat not found" или "bot was blocked by the user");
+    - при HTTP-ошибке в лог пишется ТОЧНОЕ описание от Telegram;
     - сетевые ошибки и таймауты повторяются до retries раз с растущей паузой;
-    - ошибки 4xx (неверные данные) не повторяются — это бессмысленно.
+    - ошибки 4xx не повторяются (бессмысленно).
     """
     if not token or not chat_ids:
         logger.error("Нет BOT_TOKEN или ADMIN_IDS — уведомление не отправлено.")
         return False
 
+    import urllib.error
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     ok = False
 
@@ -112,9 +111,8 @@ def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bo
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     resp.read()
                 ok = True
-                break  # доставлено — переходим к следующему адресату
+                break
             except urllib.error.HTTPError as e:
-                # Читаем тело ответа: там точная причина от Telegram
                 try:
                     body = e.read().decode("utf-8", errors="replace")
                 except Exception:
@@ -123,8 +121,6 @@ def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bo
                     f"Не удалось отправить уведомление {chat_id} "
                     f"(попытка {attempt}/{retries}): HTTP {e.code}: {body}"
                 )
-                # 4xx — ошибка в данных (чат не найден, блокировка, битый HTML):
-                # повторы бессмысленны
                 if 400 <= e.code < 500:
                     break
             except Exception as e:
@@ -132,8 +128,6 @@ def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bo
                     f"Не удалось отправить уведомление {chat_id} "
                     f"(попытка {attempt}/{retries}): {e}"
                 )
-
-            # Пауза перед следующей попыткой (только для сетевых ошибок)
             if attempt < retries:
                 time.sleep(3 * attempt)
 
@@ -304,13 +298,31 @@ def main():
         args.dry_run = True
 
     os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+
+    from logging.handlers import TimedRotatingFileHandler
+
+    def _log_namer(default_name: str) -> str:
+        head, tail = os.path.split(default_name)
+        base, sep, datepart = tail.partition(".log.")
+        if sep:
+            return os.path.join(head, f"{base}_{datepart}.log")
+        return default_name
+
+    _guard_handler = TimedRotatingFileHandler(
+        os.path.join(LOGS_DIR, "thermal_guard.log"),
+        when="midnight", interval=1, backupCount=30, encoding="utf-8",
+    )
+    _guard_handler.suffix = "%Y-%m-%d"
+    _guard_handler.namer = _log_namer
+    _guard_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    )
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=[_guard_handler, logging.StreamHandler(sys.stdout)],
     )
 
     env = load_env()
@@ -336,7 +348,6 @@ def main():
     if prev:
         prev_state = prev.get("state")
         if prev_state == "CRITICAL":
-            # Прошлый сеанс закончился аварийным выключением
             le = prev.get("last_event") or {}
             send_telegram(token, admins, (
                 "🟠 <b>Сервер включён после АВАРИЙНОГО отключения по перегреву.</b>\n\n"
@@ -346,7 +357,6 @@ def main():
             ))
             state = "NORMAL"
         elif prev_state == "WARNED":
-            # Инцидент перегрева ещё не закрыт сообщением о норме
             state = "WARNED"
             logger.info("Восстановлено состояние из статус-файла: WARNED "
                         "(инцидент перегрева не закрыт)")
@@ -416,6 +426,8 @@ def main():
                     last_warn_sent = now
                     last_event = {"type": "WARN", "temp": round(max_temp, 1),
                                   "time": ts}
+                    logger.warning(f"ПЕРЕГРЕВ: {max_temp:.0f}°C >= {warn:.0f}°C, "
+                                    f"отправлено предупреждение")
                 state = "WARNED"
 
         # --- ВОЗВРАТ В НОРМУ ---

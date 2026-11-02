@@ -101,14 +101,74 @@ async def is_user_in_group(bot, user_id: int) -> bool:
         return False
 
 
-async def add_to_cache(bot, user_id: int):
-    """Добавить пользователя в кэш (при первом успешном доступе)."""
-    cache = await load_allowed_users()
-    if user_id not in cache:
-        cache.add(user_id)
-        await save_allowed_users(cache)
-        logger.debug(f"Пользователь {user_id} добавлен в кэш")
+async def add_to_cache(bot, user_id: int, reason: str = "unknown"):
+    """Добавить пользователя в кэш разрешённых.
 
+    Каждая операция журналируется с причиной — по ней в будущем
+    можно расследовать появление «призрачных» записей.
+    """
+    allowed = await load_allowed_users()
+    if user_id not in allowed:
+        allowed.append(user_id)
+        await save_allowed_users(allowed)
+    logger.info(f"[cache+] пользователь {user_id} добавлен в разрешённые "
+                f"(причина: {reason})")
+
+
+async def remove_from_cache(user_id: int, reason: str = "unknown"):
+    """Удалить пользователя из кэша разрешённых с журналированием причины."""
+    allowed = await load_allowed_users()
+    if user_id in allowed:
+        allowed.remove(user_id)
+        await save_allowed_users(allowed)
+        logger.info(f"[cache-] пользователь {user_id} удалён из разрешённых "
+                    f"(причина: {reason})")
+
+
+async def prune_stale_allowed_users(bot) -> list:
+    """Выверка кэша: каждый ID проверяется на участие в боевой группе.
+
+    Удаляет «призраков» — ID, попавшие в файл из-за временных
+    misconfiguration или от давно вышедших участников.
+    Безопасна к сбоям сети: при сетевых ошибках и неожиданных ответах
+    запись ОСТАВЛЯЕТСЯ в кэше.
+    """
+    from aiogram.exceptions import (
+        TelegramBadRequest, TelegramNetworkError, TelegramServerError
+    )
+
+    allowed = await load_allowed_users()
+    kept, removed = [], []
+
+    for user_id in allowed:
+        # Админов из кэша не выбрасываем никогда
+        if user_id in config.ADMIN_IDS:
+            kept.append(user_id)
+            continue
+        try:
+            member = await bot.get_chat_member(config.GROUP_CHAT_ID, user_id)
+            if member.status in ("creator", "administrator", "member", "restricted"):
+                kept.append(user_id)
+            else:  # left / kicked — больше не участник
+                removed.append(user_id)
+        except TelegramBadRequest as e:
+            if "user not found" in str(e).lower():
+                removed.append(user_id)  # никогда не был в группе
+            else:
+                kept.append(user_id)
+                logger.warning(f"Неожиданный ответ при проверке {user_id}: {e}")
+        except (TelegramNetworkError, TelegramServerError) as e:
+            kept.append(user_id)
+            logger.warning(f"Сетевая ошибка при проверке {user_id}, "
+                           f"оставляю в кэше: {e}")
+        except Exception as e:
+            kept.append(user_id)
+            logger.warning(f"Ошибка проверки {user_id}, оставляю в кэше: {e}")
+
+    if removed:
+        await save_allowed_users(kept)
+        logger.info(f"[cache-] выверка удалила посторонние ID: {removed}")
+    return removed
 
 async def update_cache_from_group(bot):
     """Обновить кэш разрешённых пользователей через get_chat_administrators.

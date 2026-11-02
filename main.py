@@ -24,7 +24,9 @@ from config import BOT_TOKEN, ADMIN_IDS
 from middlewares.auth_middleware import AuthMiddleware
 from handlers import booking, status, admin, time_picker, stats, admin_panel, update, server_info
 import auth_manager
+import logging.handlers
 import update_checker
+import power_schedule
 from reports.stats_report import generate_test_report_html
 
 # ============================================
@@ -45,32 +47,54 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Дублируем логи в файл. Если основной файл недоступен для записи
-# (залочен другим процессом, только чтение, синхронизация OneDrive),
-# НЕ падаем: пишем в резервный файл или ограничиваемся консолью.
-_file_handler = None
-for _log_name in ("bot_log.txt", f"bot_log_{os.getpid()}.txt"):
+# ============================================
+# ЛОГИ: папка logs/, один файл на сутки, хранение 30 дней
+# ============================================
+
+LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_RETENTION_DAYS = 30  # сколько дней хранить логи (старые удаляются сами)
+
+
+def _log_namer(default_name: str) -> str:
+    """Переименовывает ротированный файл из bot.log.2026-10-22 в bot_2026-10-22.log."""
+    head, tail = os.path.split(default_name)
+    base, sep, datepart = tail.partition(".log.")
+    if sep:
+        return os.path.join(head, f"{base}_{datepart}.log")
+    return default_name
+
+
+def _setup_file_logging():
+    """Создаёт ротатор логов. При недоступности папки не роняет бота."""
     try:
-        _file_handler = logging.FileHandler(_log_name, encoding="utf-8")
-        _file_handler.setFormatter(
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        handler = logging.handlers.TimedRotatingFileHandler(
+            os.path.join(LOGS_DIR, "bot.log"),
+            when="midnight",       # ротация в полночь
+            interval=1,            # каждые сутки
+            backupCount=LOG_RETENTION_DAYS,
+            encoding="utf-8",
+        )
+        handler.suffix = "%Y-%m-%d"
+        handler.namer = _log_namer
+        handler.setFormatter(
             logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         )
-        logging.getLogger().addHandler(_file_handler)
-        if _log_name != "bot_log.txt":
-            logging.getLogger(__name__).warning(
-                f"bot_log.txt недоступен для записи, логи идут в {_log_name}"
-            )
-        break
+        return handler
     except OSError as e:
         logging.getLogger(__name__).warning(
-            f"Не удалось открыть лог-файл {_log_name}: {e}"
+            f"Не удалось создать лог-файл в {LOGS_DIR}: {e}. "
+            f"Остаюсь только на консоли."
         )
-        _file_handler = None
+        return None
 
-if _file_handler is None:
+
+_file_handler = _setup_file_logging()
+if _file_handler is not None:
+    logging.getLogger().addHandler(_file_handler)
+else:
     logging.getLogger(__name__).warning(
-        "Файловое логирование отключено: работаем только с консолью. "
-        "Проверьте атрибуты/блокировку bot_log.txt или OneDrive."
+        "Файловое логирование отключено: работаем только с консолью."
     )
 
 # ============================================
@@ -321,6 +345,14 @@ async def daily_update_check_task(bot: Bot):
             logger.error(f"Ошибка в задаче проверки обновлений: {e}")
 
         await asyncio.sleep(24 * 3600)
+        
+        # Плановая выверка кэша разрешённых по составу группы
+        try:
+            removed = await auth_manager.prune_stale_allowed_users(bot)
+            if removed:
+                logger.warning(f"Плановая выверка кэша: удалены {removed}")
+        except Exception as e:
+            logger.error(f"Ошибка плановой выверки кэша: {e}")
 
 
 # ============================================
@@ -400,11 +432,14 @@ async def main():
     # Инициализация кэша админов и установка команд
     try:
         await auth_manager.update_cache_from_group(bot)
+        removed = await auth_manager.prune_stale_allowed_users(bot)
+        if removed:
+            logger.warning(f"Выверка кэша при старте: удалены {removed}")
         await set_commands(bot)
         logger.info("Команды и кэш успешно обновлены")
     except Exception as e:
         logger.warning(f"Не удалось обновить команды/кэш при запуске: {e}")
-
+    
     # Проверка обновлений при запуске (автоустановка только при AUTO_UPDATE=true)
     if config.UPDATE_CHECK_ENABLED:
         try:
@@ -420,7 +455,8 @@ async def main():
     # Фоновые задачи: ежемесячный отчёт и проверка обновлений
     monthly_task = asyncio.create_task(monthly_report_task(bot))
     update_task = asyncio.create_task(daily_update_check_task(bot))
-
+    schedule_task_handle = asyncio.create_task(power_schedule.schedule_task(bot))
+    
     try:
         await safe_polling(dp, bot)
     except KeyboardInterrupt:
@@ -428,7 +464,9 @@ async def main():
     finally:
         monthly_task.cancel()
         update_task.cancel()
+        schedule_task_handle.cancel()
         await session.close()
+        
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import html
 import zipfile
 import shutil
 import logging
+import time
 
 import aiohttp
 
@@ -38,6 +39,11 @@ VERSION_FILE = os.path.join(PROJECT_DIR, "VERSION")
 
 # Файл с историей изменений
 CHANGELOG_FILE = os.path.join(PROJECT_DIR, "CHANGELOG.md")
+
+# Файл-состояние последней проверки и минимальный интервал автопроверок:
+# защищают GitHub API от rate limit (403) при частых перезапусках бота
+UPDATE_STATE_FILE = os.path.join(PROJECT_DIR, ".update_check_state.json")
+MIN_CHECK_INTERVAL_SEC = 30 * 60  # автопроверка не чаще раза в 30 минут
 
 # Файлы и папки, которые НЕЛЬЗЯ заменять при обновлении:
 # локальные настройки, данные пользователей, окружение, сгенерированные скрипты
@@ -92,18 +98,32 @@ def parse_version(version_str: str) -> tuple:
 # ============================================
 
 async def fetch_latest_release() -> dict | None:
-    """Запрашивает информацию о последнем релизе на GitHub.
+    """Запрашивает последний релиз на GitHub.
 
-    Возвращает словарь с данными релиза или None при ошибке/отсутствии.
+    При 403 логирует точную причину и время сброса rate limit.
     """
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 API_URL,
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"User-Agent": "HoriBot-Updater"},
             ) as resp:
                 if resp.status == 404:
                     logger.warning("Релизы в репозитории не найдены (404).")
+                    return None
+                if resp.status == 403:
+                    reset = resp.headers.get("x-ratelimit-reset")
+                    msg = "GitHub API вернул 403 (запрет запроса)."
+                    if reset:
+                        try:
+                            from datetime import datetime as _dt
+                            reset_dt = _dt.datetime.fromtimestamp(int(reset))
+                            msg += (f" Похоже на rate limit; "
+                                    f"лимит сбросится в {reset_dt:%H:%M:%S}.")
+                        except Exception:
+                            pass
+                    logger.warning(msg)
                     return None
                 if resp.status != 200:
                     logger.warning(f"GitHub API вернул статус {resp.status}.")
@@ -114,13 +134,36 @@ async def fetch_latest_release() -> dict | None:
         return None
 
 
-async def check_for_updates() -> dict | None:
-    """Проверяет, есть ли новая версия.
+def _read_last_check() -> float:
+    try:
+        with open(UPDATE_STATE_FILE, "r", encoding="utf-8") as f:
+            return float(json.load(f).get("last_check", 0))
+    except Exception:
+        return 0.0
 
-    Возвращает словарь с информацией об обновлении:
-        {"tag", "name", "body", "zipball_url", "url"}
-    Или None, если обновления нет или произошла ошибка.
+
+def _write_last_check(ts: float):
+    try:
+        with open(UPDATE_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"last_check": ts}, f)
+    except OSError:
+        pass
+
+
+async def check_for_updates(force: bool = False) -> dict | None:
+    """Проверяет наличие новой версии.
+
+    force=True (команда /update) игнорирует троттлинг.
+    Автопроверки идут не чаще раза в MIN_CHECK_INTERVAL_SEC,
+    чтобы частые перезапуски бота не приводили к 403 rate limit.
     """
+    now = time.time()
+    if not force and (now - _read_last_check()) < MIN_CHECK_INTERVAL_SEC:
+        logger.info("Проверка обновлений пропущена: с последней "
+                    "проверки прошло меньше 30 минут.")
+        return None
+
+    _write_last_check(now)
     release = await fetch_latest_release()
     if not release:
         return None

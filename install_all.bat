@@ -29,7 +29,6 @@ echo [1/6] Проверка наличия Python 3.14...
 echo.
 set "PYTHON_CMD="
 
-:: Пробуем py launcher
 py -3.14 --version >nul 2>&1
 if %errorlevel% equ 0 (
     set "PYTHON_CMD=py -3.14"
@@ -37,7 +36,6 @@ if %errorlevel% equ 0 (
     goto :python_found
 )
 
-:: Пробуем команду python
 python --version >nul 2>&1
 if %errorlevel% equ 0 (
     for /f "tokens=2" %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
@@ -46,7 +44,6 @@ if %errorlevel% equ 0 (
     goto :python_found
 )
 
-:: Установка через winget
 echo   Python 3.14 не найден. Попытка установки...
 echo.
 winget --version >nul 2>&1
@@ -65,7 +62,6 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: Обновляем PATH для текущей сессии
 set "PATH=%LOCALAPPDATA%\Programs\Python\Python314;%LOCALAPPDATA%\Programs\Python\Python314\Scripts;%PATH%"
 set "PATH=%ProgramFiles%\Python314;%ProgramFiles%\Python314\Scripts;%PATH%"
 
@@ -156,13 +152,11 @@ echo.
 :: ============================================
 echo [5/6] Создание скриптов запуска и остановки...
 
-:: --- start_bot.bat: защита от двойного запуска + остановка цикла
-::     при обнаружении другой копии бота (код выхода 42).
-::     БЕЗ перенаправления вывода python: логи пишет сам main.py в bot_log.txt
 (
 echo @echo off
 echo title HoriBot
 echo cd /d "%PROJECT_DIR%"
+echo if not exist "%PROJECT_DIR%\logs" mkdir "%PROJECT_DIR%\logs"
 echo.
 echo :: Не запускаем второй экземпляр, если бот уже работает
 echo tasklist /fi "WINDOWTITLE eq HoriBot" 2^>nul ^| find /i "python.exe" ^>nul
@@ -173,25 +167,24 @@ echo exit /b 0
 echo :start
 echo.
 echo :loop
-echo echo [%%date%% %%time%%] Запуск бота... ^>^> bot_log.txt
+echo echo [%%date%% %%time%%] Запуск бота... ^>^> "logs\service.log"
 echo call venv\Scripts\activate.bat
 echo python main.py
 echo if %%errorlevel%% equ 42 goto conflict
-echo echo [%%date%% %%time%%] Бот остановился. Перезапуск через 5 секунд... ^>^> bot_log.txt
+echo echo [%%date%% %%time%%] Бот остановился. Перезапуск через 5 секунд... ^>^> "logs\service.log"
 echo timeout /t 5 /nobreak ^>nul
 echo goto loop
 echo.
 echo :conflict
-echo echo [%%date%% %%time%%] Обнаружена другая копия бота. Цикл остановлен. ^>^> bot_log.txt
+echo echo [%%date%% %%time%%] Обнаружена другая копия бота. Цикл остановлен. ^>^> "logs\service.log"
 echo echo [ВНИМАНИЕ] Обнаружена другая копия бота с тем же токеном.
-echo echo Закройте лишний экземпляр (stop_bot.bat или Диспетчер задач -^> python.exe),
+echo echo Закройте лишний экземпляр (stop_bot.bat или Диспетчер задач),
 echo echo затем запустите start_bot.bat заново.
 echo pause
 echo exit /b 1
 ) > "%PROJECT_DIR%\start_bot.bat"
 echo   start_bot.bat создан.
 
-:: --- start_bot_hidden.vbs: скрытый запуск без окна
 (
 echo Set WshShell = CreateObject^("WScript.Shell"^)
 echo WshShell.Run chr^(34^) ^& "%PROJECT_DIR%\start_bot.bat" ^& chr^(34^), 0
@@ -199,7 +192,6 @@ echo Set WshShell = Nothing
 ) > "%PROJECT_DIR%\start_bot_hidden.vbs"
 echo   start_bot_hidden.vbs создан.
 
-:: --- stop_bot.bat: надёжная остановка (двойной taskkill на случай зависания)
 (
 echo @echo off
 echo chcp 65001 ^>nul
@@ -214,16 +206,14 @@ echo   stop_bot.bat создан.
 echo.
 
 :: ============================================
-:: ШАГ 6: Автозапуск (schtasks одной строкой + резервный вариант)
+:: ШАГ 6: Автозапуск
 :: ============================================
 echo [6/6] Настройка автозапуска...
 echo.
 
-:: Чистим старые варианты, чтобы не дублировать
 schtasks /delete /tn "HoriBot" /f >nul 2>&1
 del /q "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\start_bot_hidden.vbs" >nul 2>&1
 
-:: Одна строка без переносов и без /rl — меньше точек отказа
 schtasks /create /tn "HoriBot" /tr "wscript.exe \"%PROJECT_DIR%\start_bot_hidden.vbs\"" /sc onlogon /f
 
 if %errorlevel% equ 0 (
@@ -259,7 +249,7 @@ echo.
 echo   Управление:
 echo     Запустить: start_bot_hidden.vbs
 echo     Остановить: stop_bot.bat
-echo     Логи: bot_log.txt
+echo     Логи: папка logs\ (bot.log — по суткам, service.log — запуски)
 echo.
 echo   Удалить автозапуск:
 echo     schtasks /delete /tn "HoriBot" /f

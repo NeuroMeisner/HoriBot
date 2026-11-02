@@ -15,7 +15,7 @@ async def cmd_update(msg: Message, bot: Bot):
     """Проверить наличие обновления и предложить установку."""
     status = await msg.answer("🔄 Проверяю обновления...")
 
-    update_info = await update_checker.check_for_updates()
+        update_info = await update_checker.check_for_updates(force=True)
 
     if not update_info:
         await status.edit_text(
@@ -72,7 +72,7 @@ async def install_update(callback: CallbackQuery, bot: Bot):
 
     status = await callback.message.edit_text("⬇️ Скачиваю и устанавливаю обновление...")
 
-    update_info = await update_checker.check_for_updates()
+        update_info = await update_checker.check_for_updates(force=True)
     if not update_info:
         await status.edit_text("❌ Обновление не найдено (возможно, уже установлено).")
         return

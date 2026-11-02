@@ -28,6 +28,7 @@ from handlers.time_picker import (
     time_to_minutes, minutes_to_time
 )
 from auth_manager import get_users_with_names
+import power_schedule
 import config
 
 router = Router()
@@ -49,6 +50,20 @@ def format_busy_intervals(busy_intervals: list) -> str:
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
+
+def main_menu_text() -> str:
+    """Текст главного меню (используется и при восстановлении после офлайна)."""
+    return (
+        "👋 <b>Привет!</b>\n\n"
+        "Я бот для записи на прибор <b>Horiba</b>.\n\n"
+        "📌 <b>Важно:</b> чтобы просматривать расписание по ссылкам из уведомлений, "
+        "добавьте календарь себе:\n"
+        f"👉 <a href=\"{config.CALENDAR_LINK}\">Добавить календарь</a>\n\n"
+        "После этого вы сможете кликать на ссылки «Посмотреть расписание» "
+        "и видеть все записи в своём Google Calendar.\n\n"
+        "Выберите действие:"
+    )
+
 
 def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
     """Клавиатура главного меню."""
@@ -77,22 +92,14 @@ def main_menu_kb(user_id: int = None) -> InlineKeyboardMarkup:
 @router.message(Command("start"))
 async def cmd_start(msg: Message):
     """Приветственное сообщение с меню и ссылкой на календарь."""
-    text = (
-        "👋 <b>Привет!</b>\n\n"
-        "Я бот для записи на прибор <b>Horiba</b>.\n\n"
-        "📌 <b>Важно:</b> чтобы просматривать расписание по ссылкам из уведомлений, "
-        "добавьте календарь себе:\n"
-        f"👉 <a href=\"{config.CALENDAR_LINK}\">Добавить календарь</a>\n\n"
-        "После этого вы сможете кликать на ссылки «Посмотреть расписание» "
-        "и видеть все записи в своём Google Calendar.\n\n"
-        "Выберите действие:"
-    )
-    await msg.answer(
-        text,
+    text = (main_menu_text())
+    sent = await msg.answer(
+        main_menu_text(),
         reply_markup=main_menu_kb(user_id=msg.from_user.id),
         parse_mode="HTML",
         disable_web_page_preview=True
     )
+    power_schedule.track_main_menu(sent.chat.id, msg.from_user.id, sent.message_id)
 
 
 # ==================== ОБРАБОТКА КНОПОК МЕНЮ ====================
@@ -104,6 +111,9 @@ async def menu_book(callback: CallbackQuery, state: FSMContext):
         "📅 <b>Запись на Horiba</b>\n\nВыберите дату:",
         reply_markup=date_choice_kb(),
         parse_mode="HTML"
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await state.set_state(BookingStates.choosing_date)
     await state.update_data(admin_mode=False)
@@ -121,6 +131,9 @@ async def menu_my(callback: CallbackQuery):
             "📭 У вас нет активных записей",
             reply_markup=main_menu_kb(user_id=user.id)
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )   
         await callback.answer()
         return
 
@@ -137,6 +150,9 @@ async def menu_my(callback: CallbackQuery):
         reply_markup=my_bookings_kb(events),
         parse_mode="HTML"
     )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -149,6 +165,9 @@ async def menu_schedule(callback: CallbackQuery):
         await callback.message.edit_text(
             "📭 На сегодня записей нет",
             reply_markup=main_menu_kb(user_id=callback.from_user.id)
+        )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
         )
         await callback.answer()
         return
@@ -170,6 +189,9 @@ async def menu_schedule(callback: CallbackQuery):
         ]),
         parse_mode="HTML"
     )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -180,6 +202,9 @@ async def menu_back(callback: CallbackQuery):
         "👋 <b>Главное меню</b>\n\nВыберите действие:",
         reply_markup=main_menu_kb(user_id=callback.from_user.id),
         parse_mode="HTML"
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await callback.answer()
 
@@ -231,6 +256,9 @@ async def start_admin_booking(callback: CallbackQuery, state: FSMContext, bot: B
         reply_markup=kb,
         parse_mode="HTML"
     )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -266,6 +294,9 @@ async def select_user(callback: CallbackQuery, state: FSMContext):
         reply_markup=calendar_kb(today.year, today.month, allow_past=True),
         parse_mode="HTML"
     )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -299,6 +330,9 @@ async def process_date(callback: CallbackQuery, state: FSMContext):
             reply_markup=calendar_kb(today.year, today.month, allow_past=admin_mode),
             parse_mode="HTML"
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
         await callback.answer()
         return
 
@@ -322,6 +356,9 @@ async def process_date(callback: CallbackQuery, state: FSMContext):
         "⏰ Выберите время начала:",
         reply_markup=time_slots_kb(min_time=min_time, busy_intervals=busy_intervals, allow_past=admin_mode),
         parse_mode="HTML"
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await state.set_state(BookingStates.choosing_start_time)
     await callback.answer()
@@ -388,6 +425,9 @@ async def process_calendar(callback: CallbackQuery, state: FSMContext):
             reply_markup=main_menu_kb(user_id=callback.from_user.id),
             parse_mode="HTML"
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
         await state.clear()
         await callback.answer()
         return
@@ -418,6 +458,9 @@ async def process_calendar(callback: CallbackQuery, state: FSMContext):
             "⏰ Выберите время начала:",
             reply_markup=time_slots_kb(min_time=min_time, busy_intervals=busy_intervals, allow_past=admin_mode),
             parse_mode="HTML"
+        )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
         )
         await state.set_state(BookingStates.choosing_start_time)
         await callback.answer()
@@ -502,6 +545,9 @@ async def process_start_time(callback: CallbackQuery, state: FSMContext):
 
         kb = get_time_adjustment_buttons(True)
         await callback.message.edit_text(msg_text, reply_markup=kb, parse_mode="HTML")
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
         await callback.answer()
         return
 
@@ -587,6 +633,9 @@ async def process_end_time(callback: CallbackQuery, state: FSMContext):
 
         kb = get_time_adjustment_buttons(False)
         await callback.message.edit_text(msg_text, reply_markup=kb, parse_mode="HTML")
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
         await callback.answer()
         return
 
@@ -635,6 +684,9 @@ async def process_end_time(callback: CallbackQuery, state: FSMContext):
         reply_markup=confirm_cancel_kb(),
         parse_mode="HTML"
     )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await state.set_state(BookingStates.confirming)
     await callback.answer()
 
@@ -664,6 +716,9 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext, bot: Bot):
             "Пожалуйста, выберите другое время.",
             reply_markup=main_menu_kb(user_id=user.id),
             parse_mode="HTML"
+        )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
         )
         await state.clear()
         await callback.answer()
@@ -737,9 +792,15 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext, bot: Bot):
             ]),
             parse_mode="HTML"
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
 
     except Exception as e:
         await callback.message.edit_text(f"❌ Ошибка при создании записи:\n{str(e)}")
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
 
     await state.clear()
     await callback.answer()
@@ -761,6 +822,9 @@ async def cancel_booking(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "❌ Запись отменена",
         reply_markup=kb
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await state.clear()
     await callback.answer()
@@ -800,6 +864,9 @@ async def callback_my_bookings(callback: CallbackQuery):
             "📭 У вас нет активных записей",
             reply_markup=main_menu_kb(user_id=user.id)
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
         await callback.answer()
         return
 
@@ -812,6 +879,9 @@ async def callback_my_bookings(callback: CallbackQuery):
     text += "\nНажмите на запись для управления"
 
     await callback.message.edit_text(text, reply_markup=my_bookings_kb(events), parse_mode="HTML")
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -835,6 +905,9 @@ async def show_event_info(callback: CallbackQuery):
     )
 
     await callback.message.edit_text(text, reply_markup=event_actions_kb(event_id), parse_mode="HTML")
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -859,6 +932,9 @@ async def ask_delete_confirmation(callback: CallbackQuery):
     )
 
     await callback.message.edit_text(text, reply_markup=confirm_delete_kb(event_id), parse_mode="HTML")
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
+    )
     await callback.answer()
 
 
@@ -910,8 +986,14 @@ async def confirm_delete_event(callback: CallbackQuery, bot: Bot):
             ]),
             parse_mode="HTML"
         )
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
     else:
         await callback.message.edit_text("❌ Ошибка при удалении записи")
+        power_schedule.track_main_menu(
+            callback.message.chat.id, callback.from_user.id, callback.message.message_id
+        )
 
     await callback.answer()
 
@@ -920,9 +1002,12 @@ async def confirm_delete_event(callback: CallbackQuery, bot: Bot):
 async def back_to_menu(callback: CallbackQuery):
     """Вернуться в главное меню."""
     await callback.message.edit_text(
-        "👋 <b>Главное меню</b>\n\nВыберите действие:",
+        "<b>Главное меню</b>\n\nВыберите действие:",
         reply_markup=main_menu_kb(user_id=callback.from_user.id),
         parse_mode="HTML"
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await callback.answer()
 
@@ -971,6 +1056,9 @@ async def cancel_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "❌ Действие отменено",
         reply_markup=kb
+    )
+    power_schedule.track_main_menu(
+        callback.message.chat.id, callback.from_user.id, callback.message.message_id
     )
     await callback.answer()
 

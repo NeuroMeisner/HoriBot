@@ -44,3 +44,22 @@ TEMP_NORM_C = float(os.getenv("TEMP_NORM_C", "65"))   # возврат в нор
 TEMP_CHECK_SEC = int(os.getenv("TEMP_CHECK_SEC", "5"))
 TEMP_COOLDOWN_MIN = int(os.getenv("TEMP_COOLDOWN_MIN", "10"))
 
+# ====== РАСПИСАНИЕ ПИТАНИЯ И СТАТУСА МЕНЮ ======
+# По умолчанию ВЫКЛЮЧЕНО: включайте только на сервере через .env
+SCHEDULE_ENABLED = os.getenv("SCHEDULE_ENABLED", "false").lower() == "true"
+
+
+def _parse_hhmm(value: str, default: str):
+    from datetime import time as _t
+    try:
+        h, m = map(int, (value or default).strip().split(":"))
+        return _t(h, m)
+    except Exception:
+        h, m = map(int, default.split(":"))
+        return _t(h, m)
+
+
+SCHEDULE_WEEKDAY_WAKE = _parse_hhmm(os.getenv("SCHEDULE_WEEKDAY_WAKE"), "08:00")
+SCHEDULE_WEEKDAY_SLEEP = _parse_hhmm(os.getenv("SCHEDULE_WEEKDAY_SLEEP"), "23:00")
+SCHEDULE_FRIDAY_OFF = _parse_hhmm(os.getenv("SCHEDULE_FRIDAY_OFF"), "23:00")
+SCHEDULE_MONDAY_ON = _parse_hhmm(os.getenv("SCHEDULE_MONDAY_ON"), "08:00")

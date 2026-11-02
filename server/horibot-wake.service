@@ -1,0 +1,6 @@
+[Unit]
+Description=HoriBot weekday wake marker
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true

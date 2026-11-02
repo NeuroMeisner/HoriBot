@@ -1,0 +1,6 @@
+[Unit]
+Description=HoriBot backup weekend poweroff
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/horibot-weekend-off-check.sh
