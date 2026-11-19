@@ -1,5 +1,5 @@
 [Unit]
-Description=HoriBot weekday wake marker
+Description=HoriBot daily wake marker (resume from sleep)
 
 [Service]
 Type=oneshot

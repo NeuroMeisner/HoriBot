@@ -8,3 +8,4 @@ aiohttp-socks
 tzdata
 psutil==6.1.0
 tgwsapiproxy
+holidays>=0.58

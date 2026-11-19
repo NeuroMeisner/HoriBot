@@ -1,0 +1,6 @@
+[Unit]
+Description=HoriBot backup power-off check
+
+[Service]
+Type=oneshot
+ExecStart=__PROJECT_DIR__/venv/bin/python __PROJECT_DIR__/power_schedule.py --backup-off

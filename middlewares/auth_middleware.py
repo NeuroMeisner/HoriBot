@@ -23,6 +23,7 @@ from aiogram.types import Message, CallbackQuery
 
 import config
 import auth_manager
+import server_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,11 @@ class AuthMiddleware:
 
         user_id = user.id
         bot = data["bot"]
-
+        # ✅ ФИКСАЦИЯ ВОССТАНОВЛЕНИЯ СВЯЗИ
+        # Каждый обработанный апдейт означает, что соединение живо.
+        # Внутри функции есть троттлинг (запись в файл не чаще раза в минуту).
+        server_monitor.record_connection_recovery()
+        
         # ============================================
         # 1. БАН — молчаливая блокировка
         # ============================================

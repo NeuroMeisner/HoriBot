@@ -1187,7 +1187,10 @@ async def confirm_booking(callback: CallbackQuery, state: FSMContext, bot: Bot):
         )
 
     except Exception as e:
-        await callback.message.edit_text(f"❌ Ошибка при создании записи:\n{str(e)}")
+        await callback.message.edit_text(
+            f"❌ Ошибка при создании записи:\n{str(e)}", 
+            parse_mode=None
+        )
 
     await state.clear()
     await callback.answer()

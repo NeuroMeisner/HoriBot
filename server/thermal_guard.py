@@ -33,6 +33,7 @@ import sys
 import time
 import urllib.request
 from datetime import datetime
+import glob
 
 # Папка проекта = родитель папки server/
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -134,120 +135,164 @@ def send_telegram(token: str, chat_ids: list, text: str, retries: int = 3) -> bo
     return ok
 
 
+import glob
+
 # ============================================
-# ЧТЕНИЕ ТЕМПЕРАТУР
+# ЧТЕНИЕ ВСЕХ ДАТЧИКОВ И ОПРЕДЕЛЕНИЕ КОМПОНЕНТОВ
 # ============================================
 
-def read_cpu_temps() -> list:
-    """Температуры CPU из sysfs (thermal_zone + hwmon coretemp/k10temp)."""
-    vals = []
-    tz_root = "/sys/class/thermal"
-    if os.path.isdir(tz_root):
-        for zone in sorted(os.listdir(tz_root)):
-            if not zone.startswith("thermal_zone"):
-                continue
-            try:
-                with open(os.path.join(tz_root, zone, "type")) as f:
-                    ztype = f.read().strip()
-                with open(os.path.join(tz_root, zone, "temp")) as f:
-                    vals.append(int(f.read().strip()) / 1000.0)
-            except (OSError, ValueError):
-                continue
+def _classify_component(hw_name: str, path_hint: str = "") -> str:
+    """Определяет тип компонента по имени hwmon-драйвера или пути."""
+    name_lower = hw_name.lower()
+    
+    # CPU
+    if name_lower in ("coretemp", "k10temp", "zenpower", "x86_pkg_temp", 
+                      "cpu_thermal", "soc_thermal"):
+        return "CPU"
+    
+    # GPU
+    if name_lower in ("nvidia", "nouveau", "amdgpu", "radeon", "i915", "xe"):
+        return "GPU"
+        
+    # Диски (NVMe/SATA)
+    if name_lower.startswith("nvme") or name_lower in ("ata_piix", "ahci"):
+        return "Disk"
+        
+    # Системные/Материнские платы
+    if name_lower in ("it8728", "it8721", "w83627dhg", "nct6775", 
+                      "asus_atk0110", "acpitz", "pch_skylake", "fam17h_nb_tsc"):
+        return "System"
+        
+    # По умолчанию — неизвестный, но попробуем угадать по пути
+    if "gpu" in path_hint.lower():
+        return "GPU"
+    if "nvme" in path_hint.lower() or "disk" in path_hint.lower():
+        return "Disk"
+        
+    return "Other"
+
+
+def read_all_sensors() -> dict:
+    """
+    Читает температуры со всех доступных датчиков sysfs/hwmon.
+    
+    Возвращает словарь вида:
+    {
+        "sensors": [
+            {"component": "CPU", "label": "Package id 0", "value": 45.0},
+            {"component": "GPU", "label": "GeForce RTX 3080", "value": 60.0},
+            ...
+        ],
+        "max_temp": 60.0,
+        "max_source": "GPU GeForce RTX 3080"
+    }
+    """
+    sensors_list = []
+    
+    # 1. Сканируем /sys/class/hwmon
     hw_root = "/sys/class/hwmon"
     if os.path.isdir(hw_root):
-        for hw in sorted(os.listdir(hw_root)):
-            base = os.path.join(hw_root, hw)
+        for hw_dir in sorted(os.listdir(hw_root)):
+            base = os.path.join(hw_root, hw_dir)
+            
+            # Получаем имя драйвера
             try:
                 with open(os.path.join(base, "name")) as f:
-                    name = f.read().strip()
+                    driver_name = f.read().strip()
             except OSError:
                 continue
-            if name in ("coretemp", "k10temp", "cpu_thermal", "soc_thermal"):
-                for fn in os.listdir(base):
-                    if fn.startswith("temp") and fn.endswith("_input"):
+                
+            comp_type = _classify_component(driver_name, base)
+            
+            # Если это Other и не похоже на полезное, пропускаем (опционально)
+            # Но лучше читать всё, чтобы не пропустить экзотические чипы
+            
+            # Ищем файлы temp*_input и соответствующие label
+            input_files = glob.glob(os.path.join(base, "temp*_input"))
+            
+            for inp_path in sorted(input_files):
+                try:
+                    raw_val = int(open(inp_path).read().strip())
+                    temp_c = raw_val / 1000.0
+                    
+                    # Пытаемся получить красивую метку (Label)
+                    label_file = inp_path.replace("_input", "_label")
+                    label = ""
+                    if os.path.exists(label_file):
                         try:
-                            with open(os.path.join(base, fn)) as f:
-                                vals.append(int(f.read().strip()) / 1000.0)
-                        except (OSError, ValueError):
+                            label = open(label_file).read().strip()
+                        except Exception:
                             pass
-    return vals
+                    
+                    # Если нет label, используем имя файла как подсказку
+                    if not label:
+                        fname = os.path.basename(inp_path)
+                        # Например: temp1_input -> Core 1? Нет, просто Temp 1
+                        label = f"{driver_name} ({fname})"
+                        
+                    # Для NVIDIA через nvidia-smi мы обработаем отдельно ниже, 
+                    # здесь только sysfs данные (часто есть для AMD/NVIDIA nouveau)
+                    
+                    sensors_list.append({
+                        "component": comp_type,
+                        "label": label,
+                        "value": round(temp_c, 1),
+                        "source_path": inp_path
+                    })
+                except (OSError, ValueError):
+                    continue
 
-
-def read_gpu_temps() -> list:
-    """Температуры GPU: nvidia-smi (NVIDIA) и hwmon через drm (AMD)."""
-    vals = []
+    # 2. Специальная обработка NVIDIA GPU через nvidia-smi (если есть)
+    # Sysfs для NVIDIA часто пуст или дает только базовые данные, 
+    # поэтому добавляем точные данные из утилиты
     if shutil.which("nvidia-smi"):
         try:
             out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=temperature.gpu",
+                ["nvidia-smi", "--query-gpu=index,name,temperature.gpu",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=5,
             )
             if out.returncode == 0:
-                for line in out.stdout.splitlines():
-                    line = line.strip()
-                    if line.isdigit():
-                        vals.append(float(line))
+                for line in out.stdout.strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        try:
+                            idx = parts[0]
+                            gpu_name = parts[1]
+                            temp_val = float(parts[2])
+                            
+                            # Проверяем, нет ли уже этого датчика в списке (дублирование)
+                            # Обычно hwmon для NVIDIA называет себя 'nvidia'
+                            exists = any(s["component"] == "GPU" and s["label"] == gpu_name 
+                                         for s in sensors_list)
+                            if not exists:
+                                sensors_list.append({
+                                    "component": "GPU",
+                                    "label": gpu_name,
+                                    "value": round(temp_val, 1),
+                                    "source_path": f"nvidia-smi:{idx}"
+                                })
+                        except ValueError:
+                            continue
         except Exception:
             pass
-    drm = "/sys/class/drm"
-    if os.path.isdir(drm):
-        for card in sorted(os.listdir(drm)):
-            hwmon_dir = os.path.join(drm, card, "device", "hwmon")
-            if not os.path.isdir(hwmon_dir):
-                continue
-            for hw in os.listdir(hwmon_dir):
-                p = os.path.join(hwmon_dir, hw, "temp1_input")
-                if os.path.exists(p):
-                    try:
-                        with open(p) as f:
-                            vals.append(int(f.read().strip()) / 1000.0)
-                    except (OSError, ValueError):
-                        pass
-    return vals
 
-
-def read_disk_temps() -> dict:
-    """Температуры NVMe-накопителей из hwmon."""
-    temps = {}
-    hw_root = "/sys/class/hwmon"
-    if os.path.isdir(hw_root):
-        for hw in sorted(os.listdir(hw_root)):
-            base = os.path.join(hw_root, hw)
-            try:
-                with open(os.path.join(base, "name")) as f:
-                    name = f.read().strip()
-            except OSError:
-                continue
-            if name.startswith("nvme"):
-                for fn in os.listdir(base):
-                    if fn.startswith("temp") and fn.endswith("_input"):
-                        try:
-                            with open(os.path.join(base, fn)) as f:
-                                temps[name] = int(f.read().strip()) / 1000.0
-                        except (OSError, ValueError):
-                            pass
-    return temps
-
-
-def collect_temps(simulate: float | None):
-    """Собирает температуры по группам и возвращает (temps, max_temp)."""
-    if simulate is not None:
-        return {"cpu": simulate, "gpu": None, "disks": {}}, simulate
-
-    cpu_vals = read_cpu_temps()
-    gpu_vals = read_gpu_temps()
-    disks = read_disk_temps()
-
-    temps = {
-        "cpu": max(cpu_vals) if cpu_vals else None,
-        "gpu": max(gpu_vals) if gpu_vals else None,
-        "disks": disks,
+    # 3. Вычисляем максимум
+    max_temp = None
+    max_source = None
+    
+    if sensors_list:
+        # Сортируем по убыванию температуры
+        sensors_sorted = sorted(sensors_list, key=lambda x: x["value"], reverse=True)
+        hottest = sensors_sorted[0]
+        max_temp = hottest["value"]
+        max_source = f"{hottest['component']} {hottest['label']}"
+        
+    return {
+        "sensors": sensors_list,
+        "max_temp": max_temp,
+        "max_source": max_source
     }
-    all_vals = [v for v in (temps["cpu"], temps["gpu"]) if v is not None]
-    all_vals += list(disks.values())
-    max_temp = max(all_vals) if all_vals else None
-    return temps, max_temp
 
 
 def format_temps(temps: dict) -> str:
@@ -365,96 +410,106 @@ def main():
     last_warn_sent = 0.0
 
     while True:
-        temps, max_temp = collect_temps(args.simulate)
-        ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
-        if max_temp is None:
-            logger.warning("Датчики температуры не найдены — пропускаю цикл.")
-            write_status({
-                "updated": ts, "state": state, "temps": temps,
-                "max_temp": None, "last_event": last_event,
-                "dry_run": args.dry_run, "pid": os.getpid(),
-            })
-            if args.once:
-                return
-            time.sleep(interval)
-            continue
-
-        logger.info(f"Температуры: {format_temps(temps)} (max {max_temp:.0f}°C)")
-        now = time.time()
-
-        # --- КРИТИЧЕСКИЙ ПЕРЕГРЕВ ---
-        if max_temp >= crit:
-            msg = (
-                "🔥 <b>КРИТИЧЕСКИЙ ПЕРЕГРЕВ СЕРВЕРА!</b>\n\n"
-                f"Максимальная температура: <b>{max_temp:.0f}°C</b> "
-                f"(порог выключения {crit:.0f}°C)\n"
-                f"Датчики: {format_temps(temps)}\n\n"
-                "Сработала система пожарной безопасности: "
-                "сервер будет ВЫКЛЮЧЕН через несколько секунд.\n"
-                "Включение — вручную после устранения причины."
-            )
-            send_telegram(token, admins, msg)
-            last_event = {"type": "CRIT", "temp": round(max_temp, 1), "time": ts}
-            write_status({
-                "updated": ts, "state": "CRITICAL", "temps": temps,
-                "max_temp": round(max_temp, 1), "last_event": last_event,
-                "dry_run": args.dry_run, "pid": os.getpid(),
-            })
-            logger.critical(f"ПЕРЕГРЕВ {max_temp:.0f}°C >= {crit:.0f}°C")
-            if args.once:
-                return
-            time.sleep(3)  # даём Telegram доставить сообщение
-            poweroff(args.dry_run)
-            if args.dry_run:
-                state = "WARNED"  # продолжаем наблюдение в тесте
+        try:
+            now = datetime.now()
+            ts = now.strftime("%d.%m.%Y %H:%M:%S")
+            
+            # 1. Сбор данных (или симуляция)
+            if args.simulate is not None:
+                data = {
+                    "sensors": [{"component": "SIMULATED", "label": "Test Sensor", "value": args.simulate}],
+                    "max_temp": args.simulate,
+                    "max_source": "Simulated Test"
+                }
             else:
-                return
+                data = read_all_sensors()
+                
+            max_temp = data.get("max_temp")
+            sensors = data.get("sensors", [])
+            
+            # Логируем текущее состояние кратко
+            if max_temp is not None:
+                logger.info(f"Max Temp: {max_temp:.1f}°C from {data.get('max_source')} | Total sensors: {len(sensors)}")
+            else:
+                logger.warning("No temperature data available.")
 
-        # --- ПРЕДУПРЕЖДЕНИЕ ---
-        elif max_temp >= warn:
-            if state == "NORMAL":
-                if now - last_warn_sent >= cooldown:
+            # 2. Сохранение полного статуса для админ-панели
+            write_status({
+                "updated": ts,
+                "state": state, # Текущее состояние защиты (NORMAL/WARNED/CRITICAL)
+                "max_temp": max_temp,
+                "max_source": data.get("max_source"),
+                "sensors": sensors, # Список всех датчиков!
+                "last_event": last_event,
+                "dry_run": args.dry_run,
+                "pid": os.getpid(),
+            })
+
+            if max_temp is None:
+                await asyncio.sleep(interval)
+                continue
+
+            # 3. Логика защиты (сравнение с порогами)
+            
+            # --- КРИТИЧЕСКИЙ ПЕРЕГРЕВ ---
+            if max_temp >= crit:
+                msg_parts = [f"🔥 <b>КРИТИЧЕСКИЙ ПЕРЕГРЕВ!</b>",
+                             f"Максимум: <b>{max_temp:.1f}°C</b> ({data.get('max_source')})",
+                             f"Порог выключения: {crit:.0f}°C\n"]
+                # Добавляем топ-3 самых горячих датчика в сообщение
+                top_hot = sorted(sensors, key=lambda x: x["value"], reverse=True)[:3]
+                for h in top_hot:
+                    msg_parts.append(f"   • {h['component']} {h['label']}: {h['value']:.1f}°C")
+                msg_parts.append("\nСервер будет ВЫКЛЮЧЕН через несколько секунд.")
+                
+                send_telegram(token, admins, "\n".join(msg_parts))
+                last_event = {"type": "CRIT", "temp": max_temp, "time": ts, "source": data.get("max_source")}
+                state = "CRITICAL" # Флаг для лога
+                
+                logger.critical(f"PANIC SHUTDOWN TRIGGERED: {max_temp}°C")
+                
+                if args.once:
+                    break
+                
+                time.sleep(3) # Пауза на доставку
+                poweroff(args.dry_run)
+                if not args.dry_run:
+                    break # Машина выключилась, выходим из цикла
+                else:
+                    state = "WARNED" # Продолжаем наблюдение в dry-run
+
+            # --- ПРЕДУПРЕЖДЕНИЕ ---
+            elif max_temp >= warn:
+                if state != "WARNED":
+                    msg_parts = [f"⚠️ <b>ВНИМАНИЕ: Перегрев!</b>",
+                                 f"Максимум: <b>{max_temp:.1f}°C</b> ({data.get('max_source')})",
+                                 f"Порог предупреждения: {warn:.0f}°C\n"]
+                    top_hot = sorted(sensors, key=lambda x: x["value"], reverse=True)[:3]
+                    for h in top_hot:
+                        msg_parts.append(f"   • {h['component']} {h['label']}: {h['value']:.1f}°C")
+                    msg_parts.append(f"\nАварийное отключение при {crit:.0f}°C.")
+                    
+                    send_telegram(token, admins, "\n".join(msg_parts))
+                    last_event = {"type": "WARN", "temp": max_temp, "time": ts, "source": data.get("max_source")}
+                    state = "WARNED"
+                    logger.warning(f"WARN triggered: {max_temp}°C")
+
+            # --- ВОЗВРАТ В НОРМУ ---
+            else:
+                if state == "WARNED" and max_temp < norm:
                     send_telegram(token, admins, (
-                        "⚠️ <b>ВНИМАНИЕ: перегрев сервера!</b>\n\n"
-                        f"Максимальная температура: <b>{max_temp:.0f}°C</b> "
-                        f"(порог предупреждения {warn:.0f}°C)\n"
-                        f"Датчики: {format_temps(temps)}\n\n"
-                        "Сервер продолжает работу, ведётся наблюдение. "
-                        f"Аварийное выключение при {crit:.0f}°C."
+                        f"✅ <b>Температура в норме.</b>\n"
+                        f"Текущий макс: {max_temp:.1f}°C (< {norm:.0f}°C)\n"
+                        f"Источник: {data.get('max_source')}"
                     ))
-                    last_warn_sent = now
-                    last_event = {"type": "WARN", "temp": round(max_temp, 1),
-                                  "time": ts}
-                    logger.warning(f"ПЕРЕГРЕВ: {max_temp:.0f}°C >= {warn:.0f}°C, "
-                                    f"отправлено предупреждение")
-                state = "WARNED"
+                    last_event = {"type": "NORM", "temp": max_temp, "time": ts}
+                    state = "NORMAL"
+                    logger.info(f"Temperature normalized: {max_temp}°C")
 
-        # --- ВОЗВРАТ В НОРМУ ---
-        else:
-            if state == "WARNED" and max_temp < norm:
-                send_telegram(token, admins, (
-                    "✅ <b>Температура сервера пришла в норму.</b>\n\n"
-                    f"Текущая максимальная: <b>{max_temp:.0f}°C</b> "
-                    f"(порог нормы ниже {norm:.0f}°C)\n"
-                    f"Датчики: {format_temps(temps)}\n\n"
-                    "Инцидент перегрева исчерпан."
-                ))
-                logger.info(f"Температура вернулась к норме: "
-                            f"{max_temp:.0f}°C < {norm:.0f}°C, отправлено уведомление")
-                last_event = {"type": "NORM", "temp": round(max_temp, 1),
-                              "time": ts}
-                state = "NORMAL"
-
-        write_status({
-            "updated": ts, "state": state, "temps": temps,
-            "max_temp": round(max_temp, 1), "last_event": last_event,
-            "dry_run": args.dry_run, "pid": os.getpid(),
-        })
-
-        if args.once:
-            return
-        time.sleep(interval)
+        except Exception as e:
+            logger.error(f"Error in thermal guard loop: {e}", exc_info=True)
+            
+        await asyncio.sleep(interval)
 
 
 if __name__ == "__main__":

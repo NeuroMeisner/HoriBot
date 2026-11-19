@@ -1,22 +1,21 @@
 """
-Ночной/выходной режим питания и статус главного меню.
+Ночной/выходной/праздничный режим питания и статус главного меню.
 
-Самовосстанавливающийся цикл: каждые CHECK_SEC секунд сверяет
-«целевое состояние по расписанию» с «фактическим» и приводит систему к цели:
-- online   : Пн–Пт 08:00–23:00 — бот работает, главное меню восстановлено;
-- night    : Пн–Чт 23:00–08:00 — меню правится на «рабочий день закончился»,
-             машина уходит в сон (systemctl suspend);
-- weekend  : Пт 23:00 – Пн 08:00 — меню правится на «отключён на выходные»,
-             машина выключается (systemctl poweroff); перед выключением
-             best-effort ставится RTC-будильник на понедельник (rtcwake).
+Праздники: библиотека holidays (RU) + custom_holidays.json (доп. выходные)
++ custom_working_days.json (рабочие субботы/переносы).
 
-Если машина проснулась/включилась не вовремя — меню приводится к офлайну
-и через GRACE_SEC секунд машина снова усыпляется/выключается
-(кроме окна за 15 минут до планового включения, чтобы не гасить её
-сразу после раннего пробуждения будильником).
+Логика (самовосстанавливающийся цикл, каждые CHECK_SEC секунд):
+- рабочий день, 08:00–23:00            -> online
+- рабочий день, 23:00–08:00            -> night  (systemctl suspend),
+  если следующий день рабочий
+- день перед выходным/праздником, 23:00 -> weekend (systemctl poweroff)
+  + RTC-будильник (rtcwake) на 07:50 следующего рабочего дня
+- выходной/праздник                     -> weekend весь день
+- рабочий день до 08:00 после выходных  -> weekend (машина ещё выключена)
 
-Состояние: server_state/power_state.json.
-Трекер сообщений меню: menu_messages.json.
+Если машина проснулась/включилась не вовремя: меню приводится к офлайну
+и через GRACE_SEC секунд машина снова гасится (кроме окна 15 минут
+перед плановым включением).
 """
 
 import asyncio
@@ -25,9 +24,18 @@ import logging
 import os
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, date as ddate
 
 import config
+
+try:
+    import holidays as _holidays_lib
+except ImportError:
+    _holidays_lib = None
+    logging.getLogger(__name__).warning(
+        "Библиотека holidays не установлена — учитываются только "
+        "custom_holidays.json и выходные сб/вс."
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +44,79 @@ STATE_DIR = os.path.join(PROJECT_DIR, "server_state")
 POWER_STATE_FILE = os.path.join(STATE_DIR, "power_state.json")
 MENU_MESSAGES_FILE = os.path.join(PROJECT_DIR, "menu_messages.json")
 
-CHECK_SEC = 30            # частота сверки расписания
-DELIVERY_WAIT_SEC = 5     # пауза на доставку сообщений в Telegram
-GRACE_SEC = 120           # сколько даём «проснувшейся не вовремя» машине
-PRE_ONLINE_SEC = 15 * 60  # окно перед плановым включением, когда не гасим
+CUSTOM_HOLIDAYS_FILE = os.path.join(PROJECT_DIR, "custom_holidays.json")
+CUSTOM_WORKDAYS_FILE = os.path.join(PROJECT_DIR, "custom_working_days.json")
+
+CHECK_SEC = 30
+DELIVERY_WAIT_SEC = 5
+GRACE_SEC = 120
+PRE_ONLINE_SEC = 15 * 60
 
 NIGHT_TEXT = "😴 Мой рабочий день закончился. Записывайтесь завтра с 08:00."
-WEEKEND_TEXT = "🛑 Бот отключён на выходные. Вернусь в понедельник к 08:00."
+
+
+# ============================================
+# ПРАЗДНИКИ И ТИПЫ ДНЕЙ
+# ============================================
+
+_ru_cache = {}
+
+
+def _ru_holidays(year: int):
+    if _holidays_lib is None:
+        return {}
+    if year not in _ru_cache:
+        _ru_cache[year] = _holidays_lib.country_holidays("RU", years=year)
+    return _ru_cache[year]
+
+
+def _load_date_list(path: str):
+    """Читает список дат (строки или объекты {date, name})."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        result = {}
+        for item in data:
+            if isinstance(item, dict):
+                result[ddate.fromisoformat(item["date"])] = item.get("name")
+            else:
+                result[ddate.fromisoformat(item)] = None
+        return result
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать {path}: {e}")
+        return {}
+
+
+def holiday_name(d: ddate):
+    """Название праздника/корпоративного выходного, если день такой."""
+    custom = _load_date_list(CUSTOM_HOLIDAYS_FILE)
+    if d in custom:
+        return custom[d] or "Корпоративный выходной"
+    ru = _ru_holidays(d.year)
+    if d in ru:
+        return ru.get(d)
+    return None
+
+
+def is_off_day(d: ddate) -> bool:
+    """Выходной: сб/вс или праздник, если день не объявлен рабочим вручную."""
+    workdays = _load_date_list(CUSTOM_WORKDAYS_FILE)
+    if d in workdays:
+        return False
+    if holiday_name(d) is not None:
+        return True
+    return d.weekday() >= 5
+
+
+def next_workday(d: ddate) -> ddate:
+    x = d + timedelta(days=1)
+    for _ in range(400):
+        if not is_off_day(x):
+            return x
+        x += timedelta(days=1)
+    return x
 
 
 # ============================================
@@ -82,7 +156,6 @@ def _save_menu_messages(data: dict):
 
 
 def track_main_menu(chat_id: int, user_id: int, message_id: int):
-    """Запоминает последнее главное меню пользователя (синхронно)."""
     data = _load_menu_messages()
     data[str(user_id)] = {"chat_id": chat_id, "message_id": message_id}
     _save_menu_messages(data)
@@ -99,39 +172,42 @@ def _forget_menu_message(user_id: str):
 # ============================================
 
 def target_mode(now: datetime) -> str:
-    """Целевое состояние системы по расписанию."""
-    wd = now.weekday()  # 0 = понедельник
+    """Целевое состояние системы по расписанию и праздникам."""
+    d = now.date()
     t = now.time()
 
-    if wd in (5, 6):                      # суббота, воскресенье
+    if is_off_day(d):
         return "weekend"
-    if wd == 0:                           # понедельник
-        return "online" if t >= config.SCHEDULE_MONDAY_ON else "weekend"
-    if wd == 4:                           # пятница
-        if t >= config.SCHEDULE_FRIDAY_OFF:
-            return "weekend"
-        return "online" if t >= config.SCHEDULE_WEEKDAY_WAKE else "night"
-    # Пн–Чт
-    if t >= config.SCHEDULE_WEEKDAY_SLEEP:
-        return "night"
-    return "online" if t >= config.SCHEDULE_WEEKDAY_WAKE else "night"
+    if t >= config.SCHEDULE_WEEKDAY_SLEEP:          # 23:00
+        return "weekend" if is_off_day(d + timedelta(days=1)) else "night"
+    if t < config.SCHEDULE_WEEKDAY_WAKE:            # 08:00
+        return "weekend" if is_off_day(d - timedelta(days=1)) else "night"
+    return "online"
 
 
 def _in_pre_online_window(now: datetime) -> bool:
-    """True, если до планового включения осталось <= PRE_ONLINE_SEC."""
-    wd = now.weekday()
-    if wd == 0:
-        on = config.SCHEDULE_MONDAY_ON
-    elif wd <= 4:
-        on = config.SCHEDULE_WEEKDAY_WAKE
-    else:
+    """True, если до планового включения (08:00) осталось <= 15 минут."""
+    d = now.date()
+    if is_off_day(d):
         return False
-    delta = (datetime.combine(now.date(), on) - now).total_seconds()
+    delta = (datetime.combine(d, config.SCHEDULE_WEEKDAY_WAKE) - now).total_seconds()
     return 0 <= delta <= PRE_ONLINE_SEC
 
 
+def offline_text(mode: str, now: datetime) -> str:
+    if mode == "night":
+        return NIGHT_TEXT
+    nxt = next_workday(now.date())
+    name = holiday_name(now.date() + timedelta(days=1))
+    reason = f" Праздник: {name}." if name else ""
+    return (
+        "🛑 Бот отключён (выходной или праздник)."
+        f"{reason}\nВернусь {nxt:%d.%m} к {config.SCHEDULE_WEEKDAY_WAKE:%H:%M}."
+    )
+
+
 # ============================================
-# ДЕЙСТВИЯ С ПИТАНИЕМ (только Linux/systemd)
+# ДЕЙСТВИЯ С ПИТАНИЕМ
 # ============================================
 
 def _run(cmd: list):
@@ -141,20 +217,20 @@ def _run(cmd: list):
         logger.error(f"Ошибка выполнения команды {cmd}: {e}")
 
 
-def _set_rtc_wake_monday():
-    """Best-effort RTC-будильник на понедельник 07:50 (работает не на всех
-    платах из полного выключения; если не сработает — BIOS/розетка/вручную)."""
+def _set_rtc_wake():
+    """Ставит RTC-будильник на 07:50 следующего рабочего дня.
+
+    Работает из полного выключения на большинстве плат (ACPI RTC wake).
+    Режим rtcwake 'no' только взводит будильник, не усыпляя машину.
+    """
     if not shutil.which("rtcwake"):
+        logger.warning("rtcwake не найден — RTC-будильник не установлен.")
         return
-    now = datetime.now()
-    days_to_monday = (7 - now.weekday()) % 7 or 7
-    monday = datetime.combine(
-        (now + __import__("datetime").timedelta(days=days_to_monday)).date(),
-        config.SCHEDULE_MONDAY_ON
-    ) - __import__("datetime").timedelta(minutes=10)
-    epoch = int(monday.timestamp())
-    _run(["sudo", "rtcwake", "-m", "off", "-t", str(epoch)])
-    logger.info(f"RTC-будильник на включение установлен: {monday}")
+    nw = next_workday(datetime.now().date())
+    wake_dt = datetime.combine(nw, config.SCHEDULE_WEEKDAY_WAKE) - timedelta(minutes=10)
+    epoch = int(wake_dt.timestamp())
+    _run(["sudo", "rtcwake", "-m", "no", "-t", str(epoch)])
+    logger.info(f"RTC-будильник взведён на {wake_dt:%d.%m.%Y %H:%M}")
 
 
 def do_suspend():
@@ -163,7 +239,7 @@ def do_suspend():
 
 
 def do_poweroff():
-    _set_rtc_wake_monday()
+    _set_rtc_wake()
     logger.info("Выключаю машину: systemctl poweroff")
     _run(["sudo", "systemctl", "poweroff"])
 
@@ -172,78 +248,82 @@ def do_poweroff():
 # РЕДАКТИРОВАНИЕ МЕНЮ
 # ============================================
 
-async def set_offline(bot, mode: str):
-    """Правит все отслеживаемые главные меню на офлайн-текст, снимает клавиатуру."""
+async def _edit_menu(bot, user_id, entry, **kwargs) -> bool:
+    """Редактирует сообщение меню с повторами при сетевых сбоях."""
     from aiogram.exceptions import TelegramBadRequest
-    from aiogram.types import InlineKeyboardMarkup
-
-    text = NIGHT_TEXT if mode == "night" else WEEKEND_TEXT
-    messages = _load_menu_messages()
-
-    for user_id, entry in list(messages.items()):
+    for attempt in range(1, 4):
         try:
             await bot.edit_message_text(
                 chat_id=entry["chat_id"],
                 message_id=entry["message_id"],
-                text=text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                **kwargs
             )
+            return True
         except TelegramBadRequest as e:
             err = str(e).lower()
             if "not modified" in err:
-                pass
-            elif "not found" in err:
+                return True
+            if "not found" in err:
                 _forget_menu_message(user_id)
-            else:
-                logger.warning(f"Не удалось отредактировать меню {user_id}: {e}")
+                return False
+            logger.warning(f"Меню {user_id}: Telegram отклонил правку: {e}")
+            return False
         except Exception as e:
-            logger.warning(f"Не удалось отредактировать меню {user_id}: {e}")
+            logger.warning(f"Меню {user_id}: попытка {attempt}/3 не удалась: {e}")
+            if attempt < 3:
+                await asyncio.sleep(2)
+    return False
 
+
+async def set_offline(bot, mode: str):
+    from aiogram.types import InlineKeyboardMarkup
+    text = offline_text(mode, datetime.now())
+    failed = 0
+    for user_id, entry in list(_load_menu_messages().items()):
+        ok = await _edit_menu(
+            bot, user_id, entry,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+        if not ok:
+            failed += 1
+    if failed:
+        logger.error(f"Не отредактировано меню у {failed} пользователей — "
+                     f"текст обновится при ближайшем переходе режима")
     logger.info(f"Меню переведены в офлайн-режим: {mode}")
 
 
 async def set_online(bot):
-    """Возвращает отслеживаемые сообщения к главному меню с клавиатурой."""
-    from aiogram.exceptions import TelegramBadRequest
     from handlers.booking import main_menu_kb, main_menu_text
-
-    messages = _load_menu_messages()
-
-    for user_id, entry in list(messages.items()):
-        try:
-            await bot.edit_message_text(
-                chat_id=entry["chat_id"],
-                message_id=entry["message_id"],
-                text=main_menu_text(),
-                reply_markup=main_menu_kb(user_id=int(user_id)),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except TelegramBadRequest as e:
-            err = str(e).lower()
-            if "not modified" in err:
-                pass
-            elif "not found" in err:
-                _forget_menu_message(user_id)
-            else:
-                logger.warning(f"Не удалось восстановить меню {user_id}: {e}")
-        except Exception as e:
-            logger.warning(f"Не удалось восстановить меню {user_id}: {e}")
-
+    failed = 0
+    for user_id, entry in list(_load_menu_messages().items()):
+        ok = await _edit_menu(
+            bot, user_id, entry,
+            text=main_menu_text(),
+            reply_markup=main_menu_kb(user_id=int(user_id)),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        if not ok:
+            failed += 1
+    if failed:
+        logger.error(f"Не восстановлено меню у {failed} пользователей — "
+                     f"повторю при следующей проверке цикла")
     logger.info("Меню восстановлены в онлайн-режим")
-
 
 # ============================================
 # ФОНОВАЯ ЗАДАЧА
 # ============================================
 
 async def schedule_task(bot):
-    """Самовосстанавливающийся цикл приведения системы к целевому состоянию."""
     if not config.SCHEDULE_ENABLED:
         logger.info("Расписание питания выключено (SCHEDULE_ENABLED=false).")
         return
 
     logger.info("Задача расписания питания запущена.")
+        # Создаём файл состояния сразу, чтобы диагностика не видела "No such file"
+    if not os.path.exists(POWER_STATE_FILE):
+        save_power_state(target_mode(datetime.now()))
     while True:
         try:
             now = datetime.now()
@@ -264,14 +344,10 @@ async def schedule_task(bot):
                     await asyncio.sleep(DELIVERY_WAIT_SEC)
                     do_suspend() if target == "night" else do_poweroff()
                 else:
-                    # Машина работает, хотя должна быть выключена/асleep:
-                    # проснулась не вовремя. Даём grace и гасим обратно,
-                    # кроме окна непосредственно перед плановым включением.
                     since = state.get("since")
                     if since:
                         try:
-                            since_dt = datetime.fromisoformat(since)
-                            awake = (now - since_dt).total_seconds()
+                            awake = (now - datetime.fromisoformat(since)).total_seconds()
                         except ValueError:
                             awake = GRACE_SEC + 1
                     else:
@@ -288,3 +364,53 @@ async def schedule_task(bot):
             logger.error(f"Ошибка в задаче расписания питания: {e}")
 
         await asyncio.sleep(CHECK_SEC)
+
+
+# ============================================
+# CLI: резервное выключение и печать расписания
+# ============================================
+
+def _backup_off():
+    """Вызывается systemd-таймером в 23:15: гасит машину, если бот не смог."""
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s - %(levelname)s - %(message)s")
+    now = datetime.now()
+    target = target_mode(now)
+    state = load_power_state()
+    if target != "online" and state.get("mode") == "online":
+        logger.warning(f"Резервное срабатывание: бот не переключил режим, "
+                       f"применяю {target}")
+        if target == "night":
+            do_suspend()
+        else:
+            do_poweroff()
+    else:
+        logger.info(f"Резервная проверка: всё в порядке (target={target}, "
+                    f"state={state.get('mode')})")
+
+
+def _print_schedule(days: int):
+    d = datetime.now().date()
+    for i in range(days):
+        dd = d + timedelta(days=i)
+        off = is_off_day(dd)
+        name = holiday_name(dd)
+        mark = "🛑 выходной" if off else "🟢 рабочий"
+        if name:
+            mark += f" — {name}"
+        print(f"{dd:%d.%m.%Y} ({dd:%a}) — {mark}")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="HoriBot power schedule utils")
+    parser.add_argument("--backup-off", action="store_true",
+                        help="резервная проверка и выключение (для systemd)")
+    parser.add_argument("--print-schedule", type=int, default=0, metavar="DAYS",
+                        help="распечатать режим на N дней")
+    args = parser.parse_args()
+
+    if args.backup_off:
+        _backup_off()
+    elif args.print_schedule:
+        _print_schedule(args.print_schedule)
