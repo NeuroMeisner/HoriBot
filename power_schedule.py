@@ -234,8 +234,9 @@ def _set_rtc_wake():
 
 
 def do_suspend():
-    logger.info("Отправляю машину в сон: systemctl suspend")
-    _run(["sudo", "systemctl", "suspend"])
+    # Теперь "сон" — это полное выключение с будильником на утро
+    logger.info("Отправляю машину в ночное отключение (poweroff + rtcwake)")
+    do_poweroff()
 
 
 def do_poweroff():
